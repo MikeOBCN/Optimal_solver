@@ -1,0 +1,156 @@
+# Optimal control for Communication Through Coherence in perseption and selective attention.
+
+$$
+\begin{cases}
+\tag{$\textrm{OC}_1$}
+\dot{\theta}=\frac{1}{T}+PRC(\theta)u(t)\\
+\theta(0)=0\\
+\theta(t_f)=1\\
+\int_0^{t_f}u^2\rightarrow \min
+\end{cases}
+$$
+
+Closing the cycle in fixed final time. 
+
+
+using ForwardDiff, MINPACK, NLsolve, LinearAlgebra, Plots, OrdinaryDiffEq, Roots, Zygote, DifferentialEquations, QuadGK #Needed packages in Julia
+include("C:/Users/micha/Desktop/Simu/PRC-ARC_Inhib.jl")                                                                 #Compute PRC and ARC
+include("C:/Users/micha/Desktop/Simu/flow.jl")                                                                          #Solve the optimal control problem
+
+
+### INITIALIZATION ###
+
+eps1 = 1.
+eps2 = 1.
+A = 0.01
+B = 0.0
+K1 = 8.
+K2 = 8.
+mu1= -12.7039340995521393
+mu2 = mu1+T/2
+T1 = T
+T2 = T
+t0 = 0.0
+
+x0 = [1e-7]                                      #Initial state 
+xf_fixed = [T]                                   #Final state 
+Tnew = T+t_inhib-t_inhibmin
+tf = Tnew                                        #Final time
+p0 = [-0.026498039666400727]                                        #Initial co-state
+
+pre(t)=exp(K1*cos(2*pi/T1*(t-mu1)))
+I0 = (1/T1)*quadgk(pre, 0., T1, rtol=1e-8)[1]
+s1(t) = A*pre(t)/I0
+
+pre2(t)=exp(K2*cos(2*pi/T2*(t-mu2)))
+I02 = (1/T2)*quadgk(pre2, 0., T2, rtol=1e-8)[1]
+
+
+s2(t) = B*pre2(t)/I02
+
+s(t) = s1(t) + s2(t)                                               #Perturbation 
+
+
+xi = p0                                                            #Initial guess
+pars = [ eps1, eps2, A, B, K1, K2, mu1, mu2 ]
+
+### DEFINING HAMILTONIAN ###
+
+
+#Maximized hamiltonian
+
+function h(t, x, p, pars)  
+    pt = p[1]
+    theta  = x[1]
+    h0 = pt*(1+eps1*PRC(theta)*s(t))
+    h1 = pt*PRC(theta)
+    
+    r = h0 + eps2*(h1^2)/2
+    return r
+end
+
+
+  function hv(t, x, p, pars)
+        n = size(x, 1)
+        z = [x ; p]
+        foo = z -> h(t, z[1:n], z[n+1:2*n], pars)
+        dhdx, dhdp = ForwardDiff.gradient(foo, z)[1:n], ForwardDiff.gradient(foo, z)[n+1:2*n]
+        return [ dhdp ; -dhdx ]
+    end
+
+    function rhs!(dz, z, pars, t)
+        n = size(z, 1)÷2
+        x, p = z[1:n], z[n+1:2*n]
+        dz[:] = hv(t, x, p, pars)
+    end
+  
+
+f = Flow(h)
+
+# shooting 
+function shoot(p0)
+    xf, pf = f(t0, x0, p0, tf, pars)
+    s = zeros(eltype(tf), 1, 1)
+    s[1] = xf[1] - xf_fixed[1]
+    #s[2] = pf[1]
+    #s[3] = pf[2]
+    return s
+end
+
+### SOLVING THE OC PROBLEM ####
+
+
+foo   = xi -> shoot(xi)
+jfoo  = xi -> ForwardDiff.jacobian(foo, xi)
+
+#function shoot!(sh, xi)
+#    sh[1] = shoot(xi)[1]
+#end
+
+sol1 = nlsolve(foo,       xi; xtol=1e-8, method=:trust_region, show_trace=true); println(sol1)
+#sol2 = nlsolve(foo, jfoo, xi; xtol=1e-8, method=:trust_region, show_trace=true); println(sol2)
+#sol3 = fsolve(foo!,        xi, show_trace=true); println(sol3)
+#sol4 = fsolve(foo!, jfoo!, xi, show_trace=true); println(sol4)
+
+
+p0f = sol1
+z0 = [x0; p0f]    
+    odeh = ODEProblem(rhs!, z0, (t0, tf), pars)
+    z = solve(odeh, Tsit5(), abstol=1e-12, reltol=1e-12) 
+v(t) = z(t)[2]*PRC(z(t)[1])
+
+function u(t)                                                                         #Defining optimal control
+   if tf >= t >= 0 return v(t)
+    else return 0.
+   end
+end
+
+
+
+Fu(x, args, t) = [ 1/tm*(x[1]^2 - (tm*pi*x[2])^2 - J*tm*x[3] + I) + eps1*s(t) + eps2*u(t);
+               D/(pi*tm^2) + (2/tm)*x[1]*x[2];                                   #Vector Field
+               1/td*(-x[3] + x[2]) ]
+
+function OC!(dx, x, args, t) 
+    dx[:] = Fu(x, args, t)
+end
+
+ode = ODEProblem(OC!, g0, (t0, 1000.), args)
+x1 = solve(ode, Tsit5(), abstol=1e-12, reltol=1e-12);
+
+
+Fu2(x, args, t) = [ 1/tm*(x[1]^2 - (tm*pi*x[2])^2 - J*tm*x[3] + I) + eps2*s(t);
+               D/(pi*tm^2) + (2/tm)*x[1]*x[2];                                             #Pluging the optimal control into the original system.
+               1/td*(-x[3] + x[2]) ]
+
+function OC2!(dx, x, args, t) 
+    dx[:] = Fu2(x, args, t)
+end
+
+
+ode1 = ODEProblem(OC2!, x1(tf), (tf, 1000.), args)
+sol1= solve(ode1, Tsit5(), abstol=1e-12, reltol=1e-12, tstops=[2*tf, 3*tf, 4*tf, 5*tf]);
+
+
+ ode2 = ODEProblem(OC2!, g0, (0., 1000.), args)
+ sol2= solve(ode2, Tsit5(), abstol=1e-12, reltol=1e-12);
